@@ -41,30 +41,30 @@ class QuickRouteMacros(val c: whitebox.Context) {
   import processors._
 
   def append(pf: Tree) =
-    (unwrapTypedTree(pf) >>=
+    (
+      unwrapTypedTree(pf) >>=
       unwrapAbstractPartialFunctionStats >>=
       unwrapApplyOrElseExpr >>=
       unwrapMatchCases >>= {
         _.filterNot(isGeneratedDefaultCase)
           .map(unwrapScrutineeCase)
           .sequence
-      })
-      .fold(abortError, { info ⇒
+      }
+    ) fold (abortError, { info ⇒
         println(info)
         c.prefix.tree
       })
 
   def apiUnapply(scrutinee: Tree) =
-    unwrapInterpolation(c.macroApplication)
-      .fold(abortError, { info ⇒
-        val resTpe: Tree = info.args match {
-          case Nil        ⇒ tq"Boolean"
-          case tpe :: Nil ⇒ tq"Option[${tpe._2}]"
-          case tpes       ⇒ tq"Option[${spawnTupleType(tpes.map(_._2))}]"
-        }
+    unwrapInterpolation(c.macroApplication) fold (abortError, { info ⇒
+      val resTpe: Tree = info.args match {
+        case Nil        ⇒ tq"Boolean"
+        case tpe :: Nil ⇒ tq"Option[${tpe._2}]"
+        case tpes       ⇒ tq"Option[${spawnTupleType(tpes.map(_._2))}]"
+      }
 
-        q"_QRPlaceholder(${info.interpolator}, ${info.parts}).unapply[$resTpe]($scrutinee)"
-      })
+      q"_QRPlaceholder(${info.interpolator}, ${info.parts}).unapply[$resTpe]($scrutinee)"
+    })
 
   /** Immediately abort the macro expansion with a compiler error */
   def abortError(error: Error): Nothing = c.abort(error._1, error._2)

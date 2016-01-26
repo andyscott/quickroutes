@@ -27,7 +27,6 @@ class FullTestKitExampleSpec extends FunSpec with Matchers with ScalatestRouteTe
     }
 
   describe("the service") {
-
     it("works") {
       Get("/ping") ~> simpleRoute ~> check {
         responseAs[String] should equal("PONG!")
