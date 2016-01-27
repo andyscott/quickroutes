@@ -20,14 +20,16 @@ import scala.language.experimental.macros
 import scala.language.implicitConversions
 import scala.reflect.macros.whitebox
 import scala.reflect.macros.Universe
+import scala.reflect.internal.util.FreshNameCreator
+
+import org.scalamacros.resetallattrs._
 
 import cats._
 import cats.data.Xor
 import cats.std.all._
 import cats.syntax.traverse._
 import cats.syntax.flatMap._
-
-import spray.routing._
+import cats.syntax.functor._
 
 /** Quick route macro implementation.
   */
@@ -40,19 +42,45 @@ class QuickRouteMacros(val c: whitebox.Context) {
   import c.universe._
   import processors._
 
+  private lazy val methodNamer = new FreshNameCreator("qr_")
+
+  implicit class Tuple2Ops[T1, T2](t: (T1, T2)) {
+    def map1[T01](f: T1 ⇒ T01) = t.copy(_1 = f(t._1))
+    def map2[T02](f: T2 ⇒ T02) = t.copy(_2 = f(t._2))
+  }
+
   def append(pf: Tree) =
     (
+      // experimentally arranging it this way
+      // would like to add some more type information so reading through this
+      // makes sense
       unwrapTypedTree(pf) >>=
       unwrapAbstractPartialFunctionStats >>=
       unwrapApplyOrElseExpr >>=
       unwrapMatchCases >>= {
         _.filterNot(isGeneratedDefaultCase)
           .map(unwrapScrutineeCase)
+          .map(Functor[Res].lift(_.map2(resetAllAttrs)))
           .sequence
       }
     ) fold (abortError, { info ⇒
-        println(info)
-        c.prefix.tree
+
+        val routeDefDefs = info.map {
+          case (d, expr) ⇒
+            val wrapperName = TermName(methodNamer.newName(d.describePath))
+            spawnDefDefWrapper(wrapperName, d.args, expr)
+        }
+
+        val res = q"""
+        {
+          object quickRoutes {
+            ..$routeDefDefs
+          }
+          ${c.prefix.tree}
+        }
+        """
+        println(res)
+        res
       })
 
   def apiUnapply(scrutinee: Tree) =
@@ -62,12 +90,14 @@ class QuickRouteMacros(val c: whitebox.Context) {
         case tpe :: Nil ⇒ tq"Option[${tpe._2}]"
         case tpes       ⇒ tq"Option[${spawnTupleType(tpes.map(_._2))}]"
       }
-
       q"_QRPlaceholder(${info.interpolator}, ${info.parts}).unapply[$resTpe]($scrutinee)"
     })
 
   /** Immediately abort the macro expansion with a compiler error */
-  def abortError(error: Error): Nothing = c.abort(error._1, error._2)
+  private def abortError(error: Error): Nothing = c.abort(error._1, error._2)
+
+  // c.resetAllAttrs is a macro, force it to expand here
+  private lazy val resetAllAttrs = c.resetAllAttrs(_: Tree)
 
 }
 
@@ -95,15 +125,21 @@ sealed trait QuickRouteTreeProcessors {
   implicit def tuple2error[T: ({ type λ[α] = α ⇒ Position })#λ](v: (T, String)): Error =
     implicitly[T ⇒ Position].apply(v._1) → v._2
 
-  /** Decoded information about a routes shape. This is initially derived from
-    * the custom string interpolation calls. Later it is decoded (again) from
-    * a call to a marker method on `_QRPlaceholder`.
+  /** Decoded information about a routes shape. This is derived from
+    * the custom string interpolation calls.
     *
     * @param interpolator the name of the interpolator used. e.g. "get", "post", etc.
     * @param parts the string parts of the interpolated string
     * @param args name → type pairings for extracted arguments
     */
-  case class DecodedInterpolation(interpolator: String, parts: List[String], args: List[(Name, Tree)])
+  case class DecodedInterpolation(interpolator: String, parts: List[String], args: List[(Name, Tree)]) {
+    def describePath: String = parts match {
+      case head :: Nil ⇒ head
+      case head :: tail ⇒
+        head + (args.map(_._1.toString), tail).zipped.map("$" + _ + _).mkString("")
+      case Nil ⇒ "unknown_quick_route"
+    }
+  }
 
   /** Generates a `Tuple{N}` type with N type parameters `tpes` */
   def spawnTupleType(tpes: List[Tree]) =
@@ -111,6 +147,18 @@ sealed trait QuickRouteTreeProcessors {
       Select(Ident(TermName("scala")), TypeName(s"Tuple${tpes.length}")),
       tpes
     )
+
+  def spawnDefDefWrapper(name: TermName, args: List[(Name, Tree)], expr: Tree): DefDef = {
+    val vparams = args.map { arg ⇒
+      ValDef(
+        Modifiers(Flag.PARAM),
+        arg._1.toTermName,
+        arg._2,
+        EmptyTree
+      )
+    }
+    q"def $name(..$vparams) = $expr"
+  }
 
   def decodeBind(tree: Tree): Res[(Name, Tree)] = tree match {
     case Bind(pname, inner @ Bind(_, Typed(Ident(termNames.WILDCARD), tpt))) ⇒ Xor.right(pname → tpt)
@@ -120,15 +168,17 @@ sealed trait QuickRouteTreeProcessors {
   }
 
   def unwrapInterpolation(tree: Tree): Res[DecodedInterpolation] = tree match {
-    case Apply(internal.reificationSupport.SyntacticTypeApplied(Select(Select(Apply(Select(universe0, _), List(Apply(_, parts0))), interpolator0), TermName("unapply")), _), args) ⇒
+    case Apply(internal.reificationSupport.SyntacticTypeApplied(Select(Select(Apply(Select(universe0, _), List(Apply(_, parts))), interpolator), TermName("unapply")), _), args) ⇒
       for {
         subpatterns ← Xor.fromOption(
           internal.subpatterns(args.head),
           tree → s"Unable to gather subpatterns for $args": Error
         )
         decodedArgs ← subpatterns.map(decodeBind).sequence
-      } yield DecodedInterpolation(interpolator0.toString, parts0.map(_.toString), decodedArgs)
-
+        unwrappedParts ← parts.map(unwrapConstantString).sequence
+      } yield {
+        DecodedInterpolation(interpolator.toString, unwrappedParts, decodedArgs)
+      }
     case _ ⇒
       Xor.left(tree → s"Couldn't parse call prefix tree ${tree}.")
   }
@@ -194,4 +244,11 @@ sealed trait QuickRouteTreeProcessors {
       Xor.left(badTree → "Quick route case expressions must follow DSL syntax.")
   }
 
+}
+
+/** This is used internally as a placeholder during macro expansion.
+  */
+case class _QRPlaceholder(interpolator: String, parts: List[String]) {
+  /** No implementation needed. */
+  def unapply[T](x: QuickRouteScrutinee.type): T = ???
 }

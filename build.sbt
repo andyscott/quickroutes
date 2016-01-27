@@ -20,6 +20,7 @@ lazy val spray = (project in file("spray"))
     compilelibs(
       "io.spray" %% "spray-routing" % sprayVersion,
       "org.scala-lang" % "scala-compiler" % scalaVersion,
+      "org.scalamacros" % "resetallattrs_2.11" % "1.0.0",
       "org.spire-math" %% "cats" % "0.3.0"
     ) ++
     testlibs(

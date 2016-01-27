@@ -17,6 +17,7 @@
 package fail.sauce.quickroutes.spray
 
 import scala.language.experimental.macros
+import scala.language.implicitConversions
 import scala.reflect.macros.whitebox
 
 import spray.routing._
@@ -48,10 +49,3 @@ trait QuickRouteInterpolatorMethods {
 }
 
 object QuickRouteScrutinee
-
-/** This is used internally as a placeholder during macro expansion.
-  */
-case class _QRPlaceholder(interpolator: String, parts: List[String]) {
-  /** No implementation needed. */
-  def unapply[T](x: QuickRouteScrutinee.type): T = ???
-}
